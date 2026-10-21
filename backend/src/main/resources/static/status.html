@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RideFlow Status</title>
+  </head>
+  <body>
+    <h1>RideFlow Live Status</h1>
+
+    <p>
+      <label>
+        Demo rider:
+        <input id="rider" value="rider-2" />
+      </label>
+    </p>
+
+    <p>
+      <label>
+        Ride ID:
+        <input id="ride" size="40" />
+      </label>
+    </p>
+
+    <button id="connect">Connect</button>
+
+    <p id="connection">Disconnected</p>
+    <pre id="result"></pre>
+
+    <script>
+      let socket;
+      let currentRide;
+      let currentRider;
+
+      const element = (id) => document.getElementById(id);
+
+      async function refresh() {
+        try {
+          const response = await fetch(
+            `/api/rides/${encodeURIComponent(currentRide)}`,
+            {
+              headers: {
+                "X-Demo-User": currentRider,
+              },
+            },
+          );
+
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+
+          const ride = await response.json();
+
+          element("result").textContent = JSON.stringify(ride, null, 2);
+        } catch (error) {
+          element("result").textContent = error.message;
+        }
+      }
+
+      element("connect").onclick = () => {
+        if (socket) {
+          socket.close();
+        }
+
+        currentRide = element("ride").value.trim();
+        currentRider = element("rider").value.trim();
+
+        if (!currentRide || !currentRider) {
+          element("connection").textContent = "Enter rider and ride ID";
+          return;
+        }
+
+        const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+
+        const connection = new WebSocket(
+          `${protocol}//${location.host}/ws/rides/` +
+            encodeURIComponent(currentRide),
+        );
+
+        socket = connection;
+
+        connection.onopen = () => {
+          if (socket !== connection) return;
+
+          element("connection").textContent = "Connected";
+          refresh();
+        };
+
+        connection.onmessage = () => {
+          if (socket !== connection) return;
+          refresh();
+        };
+
+        connection.onclose = () => {
+          if (socket !== connection) return;
+
+          element("connection").textContent = "Disconnected";
+        };
+
+        connection.onerror = () => {
+          if (socket !== connection) return;
+
+          element("connection").textContent = "WebSocket connection error";
+        };
+      };
+    </script>
+  </body>
+</html>
