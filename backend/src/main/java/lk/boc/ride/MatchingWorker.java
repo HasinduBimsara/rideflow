@@ -51,16 +51,16 @@ public class MatchingWorker {
     private final RideUpdates updates;
 
     public MatchingWorker(
-        JdbcTemplate db,
-        StringRedisTemplate redis,
-        TransactionTemplate transaction,
-        RideUpdates updates
-) {
-    this.db = db;
-    this.redis = redis;
-    this.transaction = transaction;
-    this.updates = updates;
-}
+            JdbcTemplate db,
+            StringRedisTemplate redis,
+            TransactionTemplate transaction,
+            RideUpdates updates
+    ) {
+        this.db = db;
+        this.redis = redis;
+        this.transaction = transaction;
+        this.updates = updates;
+    }
 
     @RabbitListener(
             queues = "rides.colombo",
@@ -105,17 +105,28 @@ public class MatchingWorker {
             }
 
             if (!"QUEUED".equals(ride.get("status"))) {
-                log.info("Skipping already processed ride {}", rideId);
+                log.info(
+                        "Skipping already processed ride {} status={}",
+                        rideId,
+                        ride.get("status")
+                );
                 return;
             }
 
             long cutoff =
                     System.currentTimeMillis() - MAX_LOCATION_AGE_MS;
 
-            redis.execute(
+            Long removed = redis.execute(
                     CLEAN_STALE,
                     List.of("geo:" + city, "seen:" + city),
                     String.valueOf(cutoff)
+            );
+
+            log.info(
+                    "CLEANUP ride={} city={} removed={}",
+                    rideId,
+                    city,
+                    removed
             );
 
             double lat =
@@ -136,6 +147,17 @@ public class MatchingWorker {
                             .limit(100)
             );
 
+            log.info(
+                    "MATCH ride={} city={} lat={} lon={} candidates={}",
+                    rideId,
+                    city,
+                    lat,
+                    lon,
+                    nearby == null
+                            ? 0
+                            : nearby.getContent().size()
+            );
+
             String selectedDriver = null;
 
             if (nearby != null) {
@@ -148,24 +170,47 @@ public class MatchingWorker {
                             driver
                     );
 
-                    long currentCutoff =
-                            System.currentTimeMillis()
-                                    - MAX_LOCATION_AGE_MS;
+                    long now = System.currentTimeMillis();
+                    long currentCutoff = now - MAX_LOCATION_AGE_MS;
+
+                    log.info(
+                            "CANDIDATE ride={} driver={} ageMs={}",
+                            rideId,
+                            driver,
+                            lastSeen == null
+                                    ? "missing"
+                                    : Long.toString(
+                                            now - lastSeen.longValue()
+                                    )
+                    );
 
                     if (lastSeen == null
                             || lastSeen <= currentCutoff) {
+                        log.info(
+                                "SKIP stale location ride={} driver={}",
+                                rideId,
+                                driver
+                        );
                         continue;
                     }
 
                     int reserved = db.update("""
                             INSERT INTO assignments (
-                                driver_id, ride_id
+                                driver_id,
+                                ride_id
                             )
                             VALUES (?, ?)
                             ON CONFLICT DO NOTHING
                             """,
                             driver,
                             rideId
+                    );
+
+                    log.info(
+                            "RESERVATION ride={} driver={} inserted={}",
+                            rideId,
+                            driver,
+                            reserved
                     );
 
                     if (reserved == 1) {
@@ -184,7 +229,10 @@ public class MatchingWorker {
                         rideId
                 );
 
-                log.info("No available driver for ride {}", rideId);
+                log.info(
+                        "No available driver for ride {}",
+                        rideId
+                );
             } else {
                 db.update("""
                         UPDATE rides
@@ -203,6 +251,7 @@ public class MatchingWorker {
                 );
             }
         });
+
         updates.notifyRide(rideId);
     }
 }
