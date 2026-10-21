@@ -57,3 +57,48 @@ CREATE TABLE IF NOT EXISTS trip_history (
     pickup_area GEOMETRY(POLYGON, 4326) NOT NULL,
     completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE rides
+ADD COLUMN IF NOT EXISTS request_fingerprint VARCHAR(64);
+
+CREATE OR REPLACE FUNCTION ride_request_fingerprint(
+    request_city TEXT,
+    request_lat DOUBLE PRECISION,
+    request_lon DOUBLE PRECISION
+)
+RETURNS TEXT
+LANGUAGE SQL
+IMMUTABLE
+STRICT
+AS '
+    SELECT encode(
+        sha256(
+            convert_to(
+                jsonb_build_array(
+                    request_city,
+                    request_lat,
+                    request_lon
+                )::TEXT,
+                ''UTF8''
+            )
+        ),
+        ''hex''
+    )
+';
+
+UPDATE rides
+SET request_fingerprint = ride_request_fingerprint(city, lat, lon)
+WHERE request_fingerprint IS NULL
+  AND lat IS NOT NULL
+  AND lon IS NOT NULL;
+
+UPDATE rides r
+SET lat = NULL, lon = NULL
+WHERE r.status = 'COMPLETED'
+  AND r.request_fingerprint IS NOT NULL
+  AND (r.lat IS NOT NULL OR r.lon IS NOT NULL)
+  AND EXISTS (
+      SELECT 1
+      FROM trip_history h
+      WHERE h.ride_id = r.id
+  );

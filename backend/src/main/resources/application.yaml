@@ -52,4 +52,4 @@ management:
 
 rideflow:
   mqtt:
-    url: tcp://localhost:1883
+    url: tcp://127.0.0.1:1883
