@@ -102,3 +102,6 @@ WHERE r.status = 'COMPLETED'
       FROM trip_history h
       WHERE h.ride_id = r.id
   );
+
+ALTER TABLE rides
+ALTER COLUMN rider_id TYPE VARCHAR(128);

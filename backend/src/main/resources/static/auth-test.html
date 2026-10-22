@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RideFlow Authentication Test</title>
+
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 700px;
+        margin: 50px auto;
+        padding: 20px;
+        background: #f3f5f9;
+        color: #172033;
+      }
+
+      main {
+        padding: 25px;
+        background: white;
+        border-radius: 14px;
+      }
+
+      button {
+        padding: 12px 18px;
+        border: 0;
+        border-radius: 8px;
+        background: #2563eb;
+        color: white;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      pre {
+        padding: 15px;
+        background: #eef2f6;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+    </style>
+  </head>
+
+  <body>
+    <main>
+      <h1>Backend Authentication Test</h1>
+
+      <p id="account">Loading Firebase...</p>
+
+      <p>
+        <a href="/login.html">Open login page</a>
+      </p>
+
+      <button id="verify" disabled>Verify with backend</button>
+
+      <pre id="result">Waiting...</pre>
+    </main>
+
+    <script type="module">
+      const button = document.getElementById("verify");
+      const account = document.getElementById("account");
+      const result = document.getElementById("result");
+
+      try {
+        const [appApi, authApi] = await Promise.all([
+          import("https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js"),
+          import("https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js"),
+        ]);
+
+        const app = appApi.initializeApp({
+          apiKey: "AIzaSyAvw6oH-QXrnyF3nVQN8RSSq0g-nLC7CM8",
+          authDomain: "rideflow-3dd91.firebaseapp.com",
+          projectId: "rideflow-3dd91",
+          storageBucket: "rideflow-3dd91.firebasestorage.app",
+          messagingSenderId: "339723920460",
+          appId: "1:339723920460:web:90d2fad70f8b07307740e9",
+        });
+
+        const auth = authApi.getAuth(app);
+
+        authApi.onAuthStateChanged(auth, (user) => {
+          account.textContent = user
+            ? `Signed in: ${user.email}`
+            : "Sign in using the login page first.";
+
+          button.disabled = !user;
+
+          if (!user) {
+            result.textContent = "Not signed in.";
+          }
+        });
+
+        button.onclick = async () => {
+          button.disabled = true;
+          result.textContent = "Verifying...";
+
+          try {
+            const user = auth.currentUser;
+
+            if (!user) {
+              throw new Error("Sign in first.");
+            }
+
+            const token = await user.getIdToken();
+
+            const response = await fetch("/api/auth/me", {
+              headers: {
+                Authorization: `Bearer ${token}`,
+              },
+            });
+
+            const text = await response.text();
+
+            if (!response.ok) {
+              throw new Error(
+                `HTTP ${response.status}: ${text || "Authentication failed"}`,
+              );
+            }
+
+            result.textContent = JSON.stringify(JSON.parse(text), null, 2);
+          } catch (error) {
+            result.textContent = error.message;
+          } finally {
+            button.disabled = !auth.currentUser;
+          }
+        };
+      } catch (error) {
+        account.textContent = "Firebase initialization failed.";
+        result.textContent = error.message;
+      }
+    </script>
+  </body>
+</html>

@@ -319,11 +319,23 @@
       }
 
       async function api(path, method = "GET", body, key) {
+        const { auth } = await import("/firebase-session.js");
+
+        await auth.authStateReady();
+
+        const user = auth.currentUser;
+
+        if (!user) {
+          throw new Error("Please open /login.html and sign in first.");
+        }
+
+        const token = await user.getIdToken();
+
         const response = await fetch("/api" + path, {
           method,
           headers: {
             "Content-Type": "application/json",
-            "X-Demo-User": savedRequest.rider,
+            Authorization: `Bearer ${token}`,
             ...(key ? { "Idempotency-Key": key } : {}),
           },
           body: body ? JSON.stringify(body) : undefined,
@@ -331,6 +343,7 @@
 
         if (!response.ok) {
           const details = await response.text();
+
           throw new Error(`HTTP ${response.status}: ${details}`);
         }
 
@@ -367,43 +380,65 @@
         }
       }
 
-      function connectUpdates(id) {
+      async function connectUpdates(id) {
         disconnectUpdates();
 
-        const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-
-        const connection = new WebSocket(
-          `${protocol}//${location.host}/ws/rides/${id}`,
-        );
-
-        socket = connection;
-
-        connection.onopen = () => {
-          if (socket !== connection) return;
-
-          el("socketStatus").textContent = "Live updates connected";
-          run(refreshRide);
-        };
-
-        connection.onmessage = () => {
-          if (socket === connection) run(refreshRide);
-        };
-
-        connection.onclose = () => {
-          if (socket === connection) {
-            el("socketStatus").textContent =
-              "Live updates disconnected; polling every 3 seconds";
-          }
-        };
-
-        connection.onerror = () => {
-          if (socket === connection) {
-            el("socketStatus").textContent =
-              "WebSocket unavailable; polling every 3 seconds";
-          }
-        };
+        el("socketStatus").textContent = "Requesting secure connection...";
 
         pollTimer = setInterval(() => run(refreshRide), 3000);
+
+        try {
+          const ticketResponse = await api(
+            `/rides/${id}/socket-ticket`,
+            "POST",
+          );
+
+          if (!currentRide || currentRide.id !== id) {
+            return;
+          }
+
+          const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+
+          const connection = new WebSocket(
+            `${protocol}//${location.host}/ws/rides/${id}` +
+              `?ticket=${encodeURIComponent(ticketResponse.ticket)}`,
+          );
+
+          socket = connection;
+
+          connection.onopen = () => {
+            if (socket !== connection) return;
+
+            el("socketStatus").textContent = "Secure live updates connected";
+
+            run(refreshRide);
+          };
+
+          connection.onmessage = () => {
+            if (socket === connection) {
+              run(refreshRide);
+            }
+          };
+
+          connection.onclose = () => {
+            if (socket !== connection) return;
+
+            el("socketStatus").textContent =
+              "Live updates disconnected; polling every 3 seconds";
+          };
+
+          connection.onerror = () => {
+            if (socket !== connection) return;
+
+            el("socketStatus").textContent =
+              "WebSocket unavailable; polling every 3 seconds";
+          };
+        } catch (error) {
+          el("socketStatus").textContent =
+            "Secure connection unavailable; polling every 3 seconds";
+
+          showError(error);
+        }
       }
 
       async function submitRide(isNew) {
@@ -458,7 +493,7 @@
           );
 
           displayRide(ride);
-          connectUpdates(ride.id);
+          await connectUpdates(ride.id);
           await refreshRide();
         } finally {
           requestInProgress = false;
