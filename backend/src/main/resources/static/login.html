@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RideFlow Login</title>
+
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: #f3f5f9;
+        color: #172033;
+        font-family: Arial, sans-serif;
+      }
+
+      main {
+        width: 100%;
+        max-width: 440px;
+        padding: 32px;
+        background: white;
+        border: 1px solid #e2e8f0;
+        border-radius: 16px;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+      }
+
+      .subtitle {
+        color: #64748b;
+        margin-bottom: 24px;
+      }
+
+      label {
+        display: block;
+        margin-top: 18px;
+        font-weight: bold;
+        font-size: 14px;
+      }
+
+      input {
+        width: 100%;
+        padding: 12px;
+        margin-top: 8px;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        font: inherit;
+      }
+
+      .buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 22px;
+      }
+
+      button,
+      .link {
+        padding: 12px 16px;
+        border: 0;
+        border-radius: 8px;
+        background: #2563eb;
+        color: white;
+        font: inherit;
+        font-weight: bold;
+        cursor: pointer;
+        text-decoration: none;
+      }
+
+      .secondary {
+        background: #475569;
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      #message {
+        line-height: 1.5;
+        overflow-wrap: anywhere;
+      }
+
+      #account {
+        margin-top: 24px;
+        padding-top: 18px;
+        border-top: 1px solid #e2e8f0;
+      }
+
+      #userEmail,
+      #userUid {
+        overflow-wrap: anywhere;
+      }
+
+      .muted {
+        color: #64748b;
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+
+  <body>
+    <main>
+      <h1>RideFlow</h1>
+      <p class="subtitle">Create an account or sign in.</p>
+
+      <form id="authForm">
+        <label for="email">Email</label>
+        <input
+          id="email"
+          type="email"
+          autocomplete="email"
+          placeholder="you@example.com"
+          required
+        />
+
+        <label for="password">Password</label>
+        <input
+          id="password"
+          type="password"
+          autocomplete="current-password"
+          minlength="6"
+          placeholder="Enter your password"
+          required
+        />
+
+        <div class="buttons">
+          <button id="loginButton" type="submit" disabled>Login</button>
+
+          <button id="registerButton" class="secondary" type="button" disabled>
+            Register
+          </button>
+        </div>
+      </form>
+
+      <p id="message" role="status">Loading authentication...</p>
+
+      <section id="account" hidden>
+        <h2>Signed in</h2>
+
+        <p id="userEmail"></p>
+
+        <p class="muted">User ID: <span id="userUid"></span></p>
+
+        <div class="buttons">
+          <a class="link" href="/">Open dashboard</a>
+
+          <button id="logoutButton" class="secondary" type="button">
+            Logout
+          </button>
+        </div>
+      </section>
+    </main>
+
+    <script type="module">
+      const el = (id) => document.getElementById(id);
+
+      const firebaseConfig = {
+        apiKey: "AIzaSyAvw6oH-QXrnyF3nVQN8RSSq0g-nLC7CM8",
+        authDomain: "rideflow-3dd91.firebaseapp.com",
+        projectId: "rideflow-3dd91",
+        storageBucket: "rideflow-3dd91.firebasestorage.app",
+        messagingSenderId: "339723920460",
+        appId: "1:339723920460:web:90d2fad70f8b07307740e9",
+      };
+
+      let auth;
+      let authApi;
+      let busy = false;
+      let ready = false;
+
+      function showMessage(text, error = false) {
+        el("message").textContent = text;
+        el("message").style.color = error ? "#b91c1c" : "#166534";
+      }
+
+      function updateButtons() {
+        const disabled = busy || !ready;
+
+        el("loginButton").disabled = disabled;
+        el("registerButton").disabled = disabled;
+        el("logoutButton").disabled = disabled;
+      }
+
+      function errorMessage(error) {
+        const messages = {
+          "auth/email-already-in-use":
+            "This email is already registered. Try Login.",
+          "auth/invalid-email": "Enter a valid email address.",
+          "auth/weak-password":
+            "Choose a stronger password that meets the project policy.",
+          "auth/invalid-credential":
+            "Login failed. Check your email and password.",
+          "auth/user-not-found": "Login failed. Check your email and password.",
+          "auth/wrong-password": "Login failed. Check your email and password.",
+          "auth/operation-not-allowed":
+            "Enable Email/Password in Firebase Authentication.",
+          "auth/network-request-failed":
+            "Network request failed. Check your internet connection.",
+          "auth/too-many-requests":
+            "Too many attempts. Wait a while and try again.",
+          "auth/user-disabled": "This account has been disabled.",
+        };
+
+        return (
+          messages[error.code] || `${error.code || "Error"}: ${error.message}`
+        );
+      }
+
+      async function perform(action) {
+        if (!ready || busy) return;
+
+        busy = true;
+        updateButtons();
+        showMessage("Please wait...");
+
+        try {
+          await action();
+        } catch (error) {
+          showMessage(errorMessage(error), true);
+        } finally {
+          busy = false;
+          updateButtons();
+        }
+      }
+
+      el("authForm").addEventListener("submit", (event) => {
+        event.preventDefault();
+
+        perform(async () => {
+          await authApi.signInWithEmailAndPassword(
+            auth,
+            el("email").value.trim(),
+            el("password").value,
+          );
+
+          el("password").value = "";
+          showMessage("Login successful.");
+        });
+      });
+
+      el("registerButton").addEventListener("click", () => {
+        if (!el("authForm").reportValidity()) return;
+
+        perform(async () => {
+          await authApi.createUserWithEmailAndPassword(
+            auth,
+            el("email").value.trim(),
+            el("password").value,
+          );
+
+          el("password").value = "";
+          showMessage("Account created. You are signed in.");
+        });
+      });
+
+      el("logoutButton").addEventListener("click", () => {
+        perform(async () => {
+          await authApi.signOut(auth);
+          showMessage("You have signed out.");
+        });
+      });
+
+      try {
+        const [appApi, firebaseAuth] = await Promise.all([
+          import("https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js"),
+          import("https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js"),
+        ]);
+
+        authApi = firebaseAuth;
+
+        const app = appApi.initializeApp(firebaseConfig);
+        auth = authApi.getAuth(app);
+
+        authApi.onAuthStateChanged(
+          auth,
+          (user) => {
+            ready = true;
+            updateButtons();
+
+            el("authForm").hidden = Boolean(user);
+            el("account").hidden = !user;
+
+            el("userEmail").textContent = user?.email || "";
+            el("userUid").textContent = user?.uid || "";
+
+            showMessage(
+              user
+                ? "You are signed in."
+                : "Enter your details to register or log in.",
+            );
+          },
+          (error) => {
+            showMessage(errorMessage(error), true);
+          },
+        );
+      } catch (error) {
+        showMessage(
+          "Could not initialize Firebase. Check your connection. " +
+            error.message,
+          true,
+        );
+      }
+    </script>
+  </body>
+</html>
