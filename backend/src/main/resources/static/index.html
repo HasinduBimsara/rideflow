@@ -603,5 +603,30 @@
         disconnectUpdates();
       });
     </script>
+    <script type="module">
+      import { auth } from "/firebase-session.js";
+
+      import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
+
+      let activeUid = null;
+
+      onAuthStateChanged(auth, (user) => {
+        const accountChanged =
+          activeUid !== null && user !== null && activeUid !== user.uid;
+
+        if (!user || accountChanged) {
+          disconnectUpdates();
+          stopGps();
+
+          currentRide = null;
+          savedRequest = null;
+
+          window.location.replace("/login.html");
+          return;
+        }
+
+        activeUid = user.uid;
+      });
+    </script>
   </body>
 </html>
