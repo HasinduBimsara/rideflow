@@ -7,6 +7,8 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
 
 import java.util.List;
 import java.util.Map;
@@ -86,11 +88,11 @@ public class RideController {
     @ResponseStatus(HttpStatus.ACCEPTED)
     @Transactional
     public Map<String, Object> create(
-            @RequestHeader("X-Demo-User") String rider,
+            @AuthenticationPrincipal Jwt jwt,
             @RequestHeader("Idempotency-Key") String requestKey,
             @RequestBody RideRequest request
     ) {
-        validateIdentifier(rider);
+        String rider = jwt.getSubject();
         validateIdentifier(requestKey);
 
         if (request == null
@@ -180,9 +182,9 @@ public class RideController {
     @GetMapping("/{id}")
     public Map<String, Object> get(
             @PathVariable("id") UUID id,
-            @RequestHeader("X-Demo-User") String rider
+            @AuthenticationPrincipal Jwt jwt
     ) {
-        validateIdentifier(rider);
+        String rider = jwt.getSubject();
 
         return publicRide(
                 findOwnedRide(id, rider, false)
@@ -193,9 +195,9 @@ public class RideController {
     @Transactional
     public Map<String, Object> complete(
             @PathVariable("id") UUID id,
-            @RequestHeader("X-Demo-User") String rider
+            @AuthenticationPrincipal Jwt jwt
     ) {
-        validateIdentifier(rider);
+        String rider = jwt.getSubject();
 
         Map<String, Object> ride =
                 findOwnedRide(id, rider, true);
@@ -277,9 +279,9 @@ public class RideController {
     @Transactional
     public Map<String, Object> pay(
             @PathVariable("id") UUID id,
-            @RequestHeader("X-Demo-User") String rider
+            @AuthenticationPrincipal Jwt jwt
     ) {
-        validateIdentifier(rider);
+        String rider = jwt.getSubject();
 
         Map<String, Object> ride =
                 findOwnedRide(id, rider, true);

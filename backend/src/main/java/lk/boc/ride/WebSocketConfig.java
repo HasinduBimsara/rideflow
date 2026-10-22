@@ -8,15 +8,23 @@ import org.springframework.web.socket.config.annotation.*;
 public class WebSocketConfig implements WebSocketConfigurer {
 
     private final RideUpdates updates;
+    private final RideHandshakeInterceptor interceptor;
 
-    public WebSocketConfig(RideUpdates updates) {
+    public WebSocketConfig(
+            RideUpdates updates,
+            RideHandshakeInterceptor interceptor
+    ) {
         this.updates = updates;
+        this.interceptor = interceptor;
     }
 
     @Override
     public void registerWebSocketHandlers(
             WebSocketHandlerRegistry registry
     ) {
-        registry.addHandler(updates, "/ws/rides/*");
+        registry.addHandler(
+                updates,
+                "/ws/rides/*"
+        ).addInterceptors(interceptor);
     }
 }
