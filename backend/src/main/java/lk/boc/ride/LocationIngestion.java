@@ -44,6 +44,12 @@ public class LocationIngestion {
 
     private MqttClient client;
 
+    @Value("${rideflow.mqtt.username}")
+    private String mqttUsername;
+
+    @Value("${rideflow.mqtt.password}")
+    private String mqttPassword;
+
     public LocationIngestion(
             StringRedisTemplate redis,
             ObjectMapper mapper,
@@ -63,6 +69,8 @@ public class LocationIngestion {
         );
 
         MqttConnectOptions options = new MqttConnectOptions();
+        options.setUserName(mqttUsername);
+        options.setPassword(mqttPassword.toCharArray());    
         options.setAutomaticReconnect(true);
         options.setCleanSession(true);
         options.setConnectionTimeout(10);
