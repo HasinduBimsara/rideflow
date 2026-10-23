@@ -53,3 +53,5 @@ management:
 rideflow:
   mqtt:
     url: tcp://127.0.0.1:1883
+    username: ingestion
+    password: ${RIDEFLOW_MQTT_PASSWORD}
