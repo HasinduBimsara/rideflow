@@ -69,13 +69,14 @@ public class LocationIngestion {
         );
 
         MqttConnectOptions options = new MqttConnectOptions();
+
         options.setUserName(mqttUsername);
-        options.setPassword(mqttPassword.toCharArray());    
+        options.setPassword(mqttPassword.toCharArray());
+
         options.setAutomaticReconnect(true);
         options.setCleanSession(true);
         options.setConnectionTimeout(10);
         options.setKeepAliveInterval(30);
-
         client.setCallback(new MqttCallbackExtended() {
             @Override
             public void connectComplete(
