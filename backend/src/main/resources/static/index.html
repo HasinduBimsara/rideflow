@@ -373,10 +373,37 @@
         currentRide = ride;
         el("rideStatus").textContent = ride.status;
         el("rideDetails").textContent = JSON.stringify(ride, null, 2);
-
         el("refreshRide").disabled = false;
         el("completeRide").disabled = ride.status !== "MATCHED";
         el("payRide").disabled = ride.status !== "COMPLETED";
+        if (activeUid && ride.rider_id === activeUid) {
+          try {
+            sessionStorage.setItem(`rideflow:lastRide:${activeUid}`, ride.id);
+          } catch {
+            // Storage is optional; the current ride remains usable.
+          }
+        }
+      }
+
+      async function restoreLastRide(uid) {
+        let rideId;
+        try {
+          rideId = sessionStorage.getItem(`rideflow:lastRide:${uid}`);
+        } catch { return; }
+        if (!rideId) return;
+        el("rideDetails").textContent = "Restoring your previous ride...";
+        try {
+          const ride = await api(`/rides/${encodeURIComponent(rideId)}`);
+          if (activeUid !== uid || currentRide) return;
+          displayRide(ride);
+          el("paymentDetails").textContent =
+            "Previous payment details are not restored automatically.";
+          await connectUpdates(ride.id);
+        } catch (error) {
+          if (activeUid !== uid || currentRide) return;
+          el("rideDetails").textContent = "Could not restore your previous ride.";
+          showError(error);
+        }
       }
 
       async function refreshRide() {
@@ -742,35 +769,46 @@
         });
 
       onAuthStateChanged(auth, (user) => {
-        const accountChanged =
-          activeUid !== null && user !== null && activeUid !== user.uid;
-
+        const previousUid = activeUid;
+        const accountChanged = previousUid !== null &&
+          user !== null && previousUid !== user.uid;
         if (!user || accountChanged) {
+          if (previousUid) {
+            try {
+              sessionStorage.removeItem(`rideflow:lastRide:${previousUid}`);
+            } catch { /* Storage may be unavailable. */ }
+          }
           activeUid = null;
-
           disconnectUpdates();
           stopGps();
-
           currentRide = null;
           savedRequest = null;
-
           el("mqttPassword").value = "";
           el("driverId").value = "";
           el("riderId").value = "";
-
           window.location.replace("/login.html");
           return;
         }
-
+        const firstSessionLoad = activeUid === null;
         activeUid = user.uid;
-
         el("driverId").value = user.uid;
         el("riderId").value = user.uid;
         el("accountStatus").textContent =
           `Signed in: ${user.email || user.uid}`;
-
         el("startGps").disabled = mqttClient !== null;
         el("newRide").disabled = requestInProgress;
+        if (firstSessionLoad) {
+          el("newRide").disabled = true;
+          run(async () => {
+            try {
+              await restoreLastRide(user.uid);
+            } finally {
+              if (activeUid === user.uid) {
+                el("newRide").disabled = requestInProgress;
+              }
+            }
+          });
+        }
       });
 
       window.addEventListener("beforeunload", () => {
