@@ -23,7 +23,7 @@
         padding: 28px;
       }
 
-      header div,
+      header > div,
       main {
         max-width: 1100px;
         margin: auto;
@@ -32,12 +32,10 @@
       h1 {
         margin: 0 0 8px;
       }
-
       header p {
         margin: 0;
         color: #cbd5e1;
       }
-
       main {
         padding: 24px;
       }
@@ -79,6 +77,10 @@
         font: inherit;
       }
 
+      input[readonly] {
+        background: #f1f5f9;
+      }
+
       .coordinates {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -105,7 +107,6 @@
       button.secondary {
         background: #475569;
       }
-
       button:disabled {
         opacity: 0.5;
         cursor: not-allowed;
@@ -132,6 +133,7 @@
         color: #64748b;
         font-size: 14px;
         line-height: 1.6;
+        overflow-wrap: anywhere;
       }
 
       #error {
@@ -143,7 +145,6 @@
         .grid {
           grid-template-columns: 1fr;
         }
-
         main {
           padding: 14px;
         }
@@ -161,16 +162,32 @@
 
     <main>
       <p class="note">
-        Local demo identities and simulated GPS. Payments do not charge real
+        Firebase accounts and simulated GPS. Mock payments do not charge real
         money.
       </p>
+
+      <p id="accountStatus" class="note">Checking session...</p>
 
       <div class="grid">
         <section>
           <h2>1. Driver simulator</h2>
 
-          <label for="driverId">Driver ID</label>
-          <input id="driverId" value="driver-3" />
+          <label for="driverId">Driver ID — Firebase UID</label>
+          <input id="driverId" readonly placeholder="Sign in first" />
+
+          <label for="mqttPassword">Driver MQTT password</label>
+          <input
+            id="mqttPassword"
+            type="password"
+            autocomplete="off"
+            placeholder="Enter your driver MQTT password"
+          />
+
+          <p class="note">
+            Use the MQTT password created for your Firebase UID. This is
+            separate from your Firebase login password. This driver account
+            currently has permission for Colombo only.
+          </p>
 
           <label for="driverCity">City</label>
           <select id="driverCity">
@@ -190,22 +207,23 @@
           </div>
 
           <div class="buttons">
-            <button id="startGps">Start GPS</button>
+            <button id="startGps" disabled>Start GPS</button>
             <button id="stopGps" class="secondary">Stop GPS</button>
           </div>
 
           <p id="gpsStatus" role="status">GPS offline</p>
           <p class="note">
-            Publishes every 5 seconds. Keep this tab open. Stop GPS before
-            changing driver identity or city.
+            Publishes every 5 seconds while connected. Keep this tab open. Stop
+            GPS before changing city. Enter the password again when restarting
+            GPS.
           </p>
         </section>
 
         <section>
           <h2>2. Request a ride</h2>
 
-          <label for="riderId">Demo rider ID</label>
-          <input id="riderId" value="rider-3" />
+          <label for="riderId">Rider ID — Firebase UID</label>
+          <input id="riderId" readonly placeholder="Sign in first" />
 
           <label for="rideCity">City</label>
           <select id="rideCity">
@@ -225,7 +243,7 @@
           </div>
 
           <div class="buttons">
-            <button id="newRide">New ride</button>
+            <button id="newRide" disabled>New ride</button>
             <button id="retryRide" class="secondary" disabled>
               Retry same request
             </button>
@@ -263,19 +281,24 @@
 
     <script src="https://unpkg.com/mqtt@5.10.4/dist/mqtt.min.js"></script>
 
-    <script>
+    <script type="module">
+      import { auth } from "/firebase-session.js";
+      import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
+
       const el = (id) => document.getElementById(id);
 
-      let mqttClient;
-      let gpsTimer;
-      let socket;
-      let pollTimer;
-      let currentRide;
-      let savedRequest;
+      let activeUid = null;
+      let mqttClient = null;
+      let gpsTimer = null;
+      let socket = null;
+      let pollTimer = null;
+      let currentRide = null;
+      let savedRequest = null;
       let requestInProgress = false;
+      let updatesVersion = 0;
 
       function showError(error) {
-        el("error").textContent = error.message;
+        el("error").textContent = error.message || String(error);
       }
 
       async function run(action) {
@@ -308,27 +331,20 @@
         return { lat, lon };
       }
 
-      function validIdentity(value) {
-        if (!/^[A-Za-z0-9_-]{1,100}$/.test(value)) {
-          throw new Error(
-            "IDs must contain 1–100 letters, numbers, underscores or hyphens.",
-          );
-        }
-
-        return value;
-      }
-
-      async function api(path, method = "GET", body, key) {
-        const { auth } = await import("/firebase-session.js");
-
+      async function signedInUser() {
         await auth.authStateReady();
 
         const user = auth.currentUser;
 
-        if (!user) {
-          throw new Error("Please open /login.html and sign in first.");
+        if (!user || user.uid !== activeUid) {
+          throw new Error("Please sign in again.");
         }
 
+        return user;
+      }
+
+      async function api(path, method = "GET", body, key) {
+        const user = await signedInUser();
         const token = await user.getIdToken();
 
         const response = await fetch("/api" + path, {
@@ -338,13 +354,16 @@
             Authorization: `Bearer ${token}`,
             ...(key ? { "Idempotency-Key": key } : {}),
           },
-          body: body ? JSON.stringify(body) : undefined,
+          body: body === undefined ? undefined : JSON.stringify(body),
         });
 
         if (!response.ok) {
           const details = await response.text();
-
           throw new Error(`HTTP ${response.status}: ${details}`);
+        }
+
+        if (auth.currentUser?.uid !== user.uid) {
+          throw new Error("Account changed. Please sign in again.");
         }
 
         return response.json();
@@ -366,34 +385,36 @@
         const id = currentRide.id;
         const ride = await api(`/rides/${id}`);
 
-        if (currentRide && currentRide.id === id) {
+        if (currentRide?.id === id) {
           displayRide(ride);
         }
       }
 
       function disconnectUpdates() {
+        updatesVersion++;
         clearInterval(pollTimer);
+        pollTimer = null;
 
-        if (socket) {
-          socket.close();
-          socket = null;
+        const previous = socket;
+        socket = null;
+
+        if (previous) {
+          previous.close();
         }
       }
 
       async function connectUpdates(id) {
         disconnectUpdates();
 
+        const version = updatesVersion;
         el("socketStatus").textContent = "Requesting secure connection...";
 
         pollTimer = setInterval(() => run(refreshRide), 3000);
 
         try {
-          const ticketResponse = await api(
-            `/rides/${id}/socket-ticket`,
-            "POST",
-          );
+          const result = await api(`/rides/${id}/socket-ticket`, "POST");
 
-          if (!currentRide || currentRide.id !== id) {
+          if (updatesVersion !== version || currentRide?.id !== id) {
             return;
           }
 
@@ -401,7 +422,7 @@
 
           const connection = new WebSocket(
             `${protocol}//${location.host}/ws/rides/${id}` +
-              `?ticket=${encodeURIComponent(ticketResponse.ticket)}`,
+              `?ticket=${encodeURIComponent(result.ticket)}`,
           );
 
           socket = connection;
@@ -434,6 +455,8 @@
               "WebSocket unavailable; polling every 3 seconds";
           };
         } catch (error) {
+          if (updatesVersion !== version) return;
+
           el("socketStatus").textContent =
             "Secure connection unavailable; polling every 3 seconds";
 
@@ -444,6 +467,8 @@
       async function submitRide(isNew) {
         if (requestInProgress) return;
 
+        const user = await signedInUser();
+
         if (isNew) {
           if (
             currentRide &&
@@ -452,11 +477,10 @@
             throw new Error("Finish the current ride before creating another.");
           }
 
-          const rider = validIdentity(el("riderId").value.trim());
           const pickup = coordinates("rideLat", "rideLon");
 
           savedRequest = {
-            rider,
+            uid: user.uid,
             key: crypto.randomUUID(),
             body: {
               city: el("rideCity").value,
@@ -466,17 +490,18 @@
 
           disconnectUpdates();
           currentRide = null;
+
           el("rideStatus").textContent = "SUBMITTING";
           el("rideDetails").textContent = "Sending ride request...";
           el("paymentDetails").textContent = "No payment yet.";
           el("socketStatus").textContent = "Connecting after submission";
+
           el("refreshRide").disabled = true;
           el("completeRide").disabled = true;
           el("payRide").disabled = true;
-          el("retryRide").disabled = false;
         }
 
-        if (!savedRequest) {
+        if (!savedRequest || savedRequest.uid !== user.uid) {
           throw new Error("Create a ride request first.");
         }
 
@@ -497,135 +522,260 @@
           await refreshRide();
         } finally {
           requestInProgress = false;
-          el("newRide").disabled = false;
-          el("retryRide").disabled = false;
+
+          const signedIn =
+            activeUid !== null && auth.currentUser?.uid === activeUid;
+
+          el("newRide").disabled = !signedIn;
+          el("retryRide").disabled = !signedIn || !savedRequest;
         }
       }
 
       function stopGps() {
         clearInterval(gpsTimer);
+        gpsTimer = null;
 
-        if (mqttClient) {
-          mqttClient.end(true);
-          mqttClient = null;
+        const client = mqttClient;
+        mqttClient = null;
+
+        if (client) {
+          client.end(true);
         }
+
+        el("driverCity").disabled = false;
+        el("mqttPassword").disabled = false;
+        el("startGps").disabled = !activeUid;
 
         el("gpsStatus").textContent =
           "GPS offline; location becomes stale after 30 seconds";
       }
 
-      function startGps() {
-        if (typeof mqtt === "undefined") {
+      async function startGps() {
+        if (typeof window.mqtt === "undefined") {
           throw new Error(
             "MQTT library did not load. Check internet and reload.",
           );
         }
 
-        const driver = validIdentity(el("driverId").value.trim());
+        const user = await signedInUser();
+        const driver = user.uid;
         const city = el("driverCity").value;
-        coordinates("driverLat", "driverLon");
+        const password = el("mqttPassword").value;
 
+        if (!/^[A-Za-z0-9_-]{1,100}$/.test(driver)) {
+          throw new Error(
+            "This Firebase UID is unsupported by the current driver simulator.",
+          );
+        }
+
+        if (!password) {
+          throw new Error("Enter your driver MQTT password.");
+        }
+
+        if (city !== "colombo") {
+          throw new Error(
+            "This driver account currently has MQTT permission for Colombo only.",
+          );
+        }
+
+        if (location.protocol !== "http:") {
+          throw new Error("Open this local demo at http://localhost:8081.");
+        }
+
+        coordinates("driverLat", "driverLon");
         stopGps();
 
-        const client = mqtt.connect(`ws://${location.hostname}:9001`, {
-          clientId: "rideflow-driver-" + crypto.randomUUID(),
-          reconnectPeriod: 2000,
-          clean: true,
-        });
+        el("driverId").value = driver;
+        el("driverCity").disabled = true;
+        el("mqttPassword").disabled = true;
+        el("mqttPassword").value = "";
+        el("startGps").disabled = true;
+
+        let client;
+
+        try {
+          client = window.mqtt.connect(`ws://${location.hostname}:9001`, {
+            clientId: "rideflow-driver-" + crypto.randomUUID(),
+            protocolVersion: 5,
+            username: driver,
+            password,
+            clean: true,
+            reconnectPeriod: 0,
+            connectTimeout: 10000,
+            keepalive: 30,
+          });
+        } catch (error) {
+          stopGps();
+          throw error;
+        }
 
         mqttClient = client;
         el("gpsStatus").textContent = "Connecting to MQTT...";
 
+        let publishPending = false;
+
+        function fail(message) {
+          if (mqttClient !== client) return;
+
+          stopGps();
+          el("gpsStatus").textContent = message;
+          showError(new Error(message));
+        }
+
         client.on("connect", () => {
           if (mqttClient !== client) return;
 
-          clearInterval(gpsTimer);
+          if (auth.currentUser?.uid !== driver) {
+            fail("Account changed. GPS stopped.");
+            return;
+          }
 
           const publish = () => {
+            if (mqttClient !== client || !client.connected || publishPending) {
+              return;
+            }
+
+            if (auth.currentUser?.uid !== driver) {
+              fail("Session changed. GPS stopped.");
+              return;
+            }
+
             try {
               const position = coordinates("driverLat", "driverLon");
+              publishPending = true;
+
+              el("gpsStatus").textContent =
+                "Sending GPS; waiting for broker acknowledgment...";
 
               client.publish(
                 `drivers/${city}/${driver}/location`,
                 JSON.stringify(position),
-                { qos: 0, retain: false },
-              );
+                {
+                  qos: 1,
+                  retain: false,
+                  properties: {
+                    messageExpiryInterval: 10,
+                  },
+                },
+                (error, packet) => {
+                  publishPending = false;
 
-              el("gpsStatus").textContent =
-                `${driver}: GPS sent at ${new Date().toLocaleTimeString()}`;
+                  if (mqttClient !== client) return;
+
+                  if (error || (packet?.reasonCode ?? 0) >= 128) {
+                    fail(
+                      "GPS publish rejected. Check the driver password and MQTT ACL.",
+                    );
+                    return;
+                  }
+
+                  el("gpsStatus").textContent =
+                    `${driver}: broker accepted GPS at ` +
+                    new Date().toLocaleTimeString();
+                },
+              );
             } catch (error) {
-              showError(error);
+              fail(error.message);
             }
           };
 
           publish();
-          gpsTimer = setInterval(publish, 5000);
-        });
 
-        client.on("offline", () => {
-          if (mqttClient !== client) return;
-
-          clearInterval(gpsTimer);
-          el("gpsStatus").textContent = "MQTT offline; reconnecting...";
+          if (mqttClient === client) {
+            gpsTimer = setInterval(publish, 5000);
+          }
         });
 
         client.on("error", (error) => {
-          if (mqttClient === client) {
-            el("gpsStatus").textContent = error.message;
-          }
+          fail("MQTT connection failed: " + error.message);
+        });
+
+        client.on("disconnect", (packet) => {
+          fail(
+            "MQTT broker disconnected the driver. Reason: " +
+              (packet.reasonCode ?? "unknown"),
+          );
+        });
+
+        client.on("close", () => {
+          fail(
+            "MQTT connection closed. Enter the password and start GPS again.",
+          );
         });
       }
 
       el("startGps").onclick = () => run(startGps);
-      el("stopGps").onclick = stopGps;
+
+      el("stopGps").onclick = () => {
+        stopGps();
+        el("mqttPassword").value = "";
+      };
+
       el("newRide").onclick = () => run(() => submitRide(true));
+
       el("retryRide").onclick = () => run(() => submitRide(false));
+
       el("refreshRide").onclick = () => run(refreshRide);
 
       el("completeRide").onclick = () =>
         run(async () => {
           if (!currentRide) return;
 
-          displayRide(await api(`/rides/${currentRide.id}/complete`, "POST"));
+          const id = currentRide.id;
+          const ride = await api(`/rides/${id}/complete`, "POST");
+
+          if (currentRide?.id === id) {
+            displayRide(ride);
+          }
         });
 
       el("payRide").onclick = () =>
         run(async () => {
           if (!currentRide) return;
 
-          const payment = await api(`/rides/${currentRide.id}/pay`, "POST");
+          const id = currentRide.id;
+          const payment = await api(`/rides/${id}/pay`, "POST");
 
-          el("paymentDetails").textContent = JSON.stringify(payment, null, 2);
+          if (currentRide?.id === id) {
+            el("paymentDetails").textContent = JSON.stringify(payment, null, 2);
+          }
         });
-
-      window.addEventListener("beforeunload", () => {
-        stopGps();
-        disconnectUpdates();
-      });
-    </script>
-    <script type="module">
-      import { auth } from "/firebase-session.js";
-
-      import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
-
-      let activeUid = null;
 
       onAuthStateChanged(auth, (user) => {
         const accountChanged =
           activeUid !== null && user !== null && activeUid !== user.uid;
 
         if (!user || accountChanged) {
+          activeUid = null;
+
           disconnectUpdates();
           stopGps();
 
           currentRide = null;
           savedRequest = null;
 
+          el("mqttPassword").value = "";
+          el("driverId").value = "";
+          el("riderId").value = "";
+
           window.location.replace("/login.html");
           return;
         }
 
         activeUid = user.uid;
+
+        el("driverId").value = user.uid;
+        el("riderId").value = user.uid;
+        el("accountStatus").textContent =
+          `Signed in: ${user.email || user.uid}`;
+
+        el("startGps").disabled = mqttClient !== null;
+        el("newRide").disabled = requestInProgress;
+      });
+
+      window.addEventListener("beforeunload", () => {
+        stopGps();
+        disconnectUpdates();
       });
     </script>
   </body>
