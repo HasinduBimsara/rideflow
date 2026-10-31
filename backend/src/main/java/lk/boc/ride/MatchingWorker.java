@@ -1,9 +1,14 @@
 package lk.boc.ride;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.geo.Circle;
 import org.springframework.data.geo.Distance;
 import org.springframework.data.geo.Metrics;
@@ -49,17 +54,66 @@ public class MatchingWorker {
     private final StringRedisTemplate redis;
     private final TransactionTemplate transaction;
     private final RideUpdates updates;
+    private final MeterRegistry registry;
 
+    // Used by existing tests that construct a worker directly.
     public MatchingWorker(
             JdbcTemplate db,
             StringRedisTemplate redis,
             TransactionTemplate transaction,
             RideUpdates updates
     ) {
+        this(
+                db,
+                redis,
+                transaction,
+                updates,
+                new SimpleMeterRegistry()
+        );
+    }
+
+    // Spring injects the application's metrics registry here.
+    @Autowired
+    public MatchingWorker(
+            JdbcTemplate db,
+            StringRedisTemplate redis,
+            TransactionTemplate transaction,
+            RideUpdates updates,
+            MeterRegistry registry
+    ) {
         this.db = db;
         this.redis = redis;
         this.transaction = transaction;
         this.updates = updates;
+        this.registry = registry;
+
+        // Register zero-valued series before any rides arrive.
+        for (String city : List.of("colombo", "kandy")) {
+            staleCounter(city);
+
+            for (String outcome : List.of(
+                    "MATCHED", "NO_DRIVER", "SKIPPED", "ERROR"
+            )) {
+                processingTimer(city, outcome);
+            }
+        }
+    }
+
+    private Counter staleCounter(String city) {
+        return Counter.builder("rideflow.locations.stale.removed")
+                .description("Stale driver locations removed from Redis")
+                .tag("city", city)
+                .register(registry);
+    }
+
+    private Timer processingTimer(String city, String outcome) {
+        return Timer.builder("rideflow.matching.duration")
+                .description(
+                        "Worker processing time, excluding queue waiting time"
+                )
+                .tag("city", city)
+                .tag("outcome", outcome)
+                .register(registry);
     }
 
     @RabbitListener(
@@ -79,161 +133,130 @@ public class MatchingWorker {
     }
 
     private void process(Message message, String expectedCity) {
-        UUID rideId = UUID.fromString(
-                new String(
-                        message.getBody(),
-                        StandardCharsets.UTF_8
-                )
-        );
+        Timer.Sample sample = Timer.start(registry);
+        String outcome = "ERROR";
 
-        transaction.executeWithoutResult(status -> {
-            Map<String, Object> ride = db.queryForMap("""
-                    SELECT *
-                    FROM rides
-                    WHERE id = ?
-                    FOR UPDATE
-                    """,
-                    rideId
+        try {
+            UUID rideId = UUID.fromString(
+                    new String(
+                            message.getBody(),
+                            StandardCharsets.UTF_8
+                    )
             );
 
-            String city = ride.get("city").toString();
-
-            if (!expectedCity.equals(city)) {
-                throw new IllegalStateException(
-                        "Ride received on incorrect city queue"
-                );
-            }
-
-            if (!"QUEUED".equals(ride.get("status"))) {
-                log.info(
-                        "Skipping already processed ride {} status={}",
-                        rideId,
-                        ride.get("status")
-                );
-                return;
-            }
-
-            long cutoff =
-                    System.currentTimeMillis() - MAX_LOCATION_AGE_MS;
-
-            Long removed = redis.execute(
-                    CLEAN_STALE,
-                    List.of("geo:" + city, "seen:" + city),
-                    String.valueOf(cutoff)
-            );
-
-            log.info(
-                    "CLEANUP ride={} city={} removed={}",
-                    rideId,
-                    city,
-                    removed
-            );
-
-            double lat =
-                    ((Number) ride.get("lat")).doubleValue();
-
-            double lon =
-                    ((Number) ride.get("lon")).doubleValue();
-
-            var nearby = redis.opsForGeo().radius(
-                    "geo:" + city,
-                    new Circle(
-                            new Point(lon, lat),
-                            new Distance(5, Metrics.KILOMETERS)
-                    ),
-                    RedisGeoCommands.GeoRadiusCommandArgs
-                            .newGeoRadiusArgs()
-                            .sortAscending()
-                            .limit(100)
-            );
-
-            log.info(
-                    "MATCH ride={} city={} lat={} lon={} candidates={}",
-                    rideId,
-                    city,
-                    lat,
-                    lon,
-                    nearby == null
-                            ? 0
-                            : nearby.getContent().size()
-            );
-
-            String selectedDriver = null;
-
-            if (nearby != null) {
-                for (var candidate : nearby) {
-                    String driver =
-                            candidate.getContent().getName();
-
-                    Double lastSeen = redis.opsForZSet().score(
-                            "seen:" + city,
-                            driver
-                    );
-
-                    long now = System.currentTimeMillis();
-                    long currentCutoff = now - MAX_LOCATION_AGE_MS;
-
-                    log.info(
-                            "CANDIDATE ride={} driver={} ageMs={}",
-                            rideId,
-                            driver,
-                            lastSeen == null
-                                    ? "missing"
-                                    : Long.toString(
-                                            now - lastSeen.longValue()
-                                    )
-                    );
-
-                    if (lastSeen == null
-                            || lastSeen <= currentCutoff) {
-                        log.info(
-                                "SKIP stale location ride={} driver={}",
-                                rideId,
-                                driver
-                        );
-                        continue;
-                    }
-
-                    int reserved = db.update("""
-                            INSERT INTO assignments (
-                                driver_id,
-                                ride_id
-                            )
-                            VALUES (?, ?)
-                            ON CONFLICT DO NOTHING
-                            """,
-                            driver,
-                            rideId
-                    );
-
-                    log.info(
-                            "RESERVATION ride={} driver={} inserted={}",
-                            rideId,
-                            driver,
-                            reserved
-                    );
-
-                    if (reserved == 1) {
-                        selectedDriver = driver;
-                        break;
-                    }
-                }
-            }
-
-            if (selectedDriver == null) {
-                db.update("""
-                        UPDATE rides
-                        SET status = 'NO_DRIVER'
+            String result = transaction.execute(status -> {
+                Map<String, Object> ride = db.queryForMap("""
+                        SELECT *
+                        FROM rides
                         WHERE id = ?
+                        FOR UPDATE
                         """,
                         rideId
                 );
 
-                log.info(
-                        "No available driver for ride {}",
-                        rideId
+                String city = ride.get("city").toString();
+
+                if (!expectedCity.equals(city)) {
+                    throw new IllegalStateException(
+                            "Ride received on incorrect city queue"
+                    );
+                }
+
+                if (!"QUEUED".equals(ride.get("status"))) {
+                    log.info(
+                            "Skipping already processed ride {} status={}",
+                            rideId,
+                            ride.get("status")
+                    );
+
+                    return "SKIPPED";
+                }
+
+                long cutoff =
+                        System.currentTimeMillis() - MAX_LOCATION_AGE_MS;
+
+                Long removed = redis.execute(
+                        CLEAN_STALE,
+                        List.of("geo:" + city, "seen:" + city),
+                        String.valueOf(cutoff)
                 );
-            } else {
+
+                if (removed != null && removed > 0) {
+                    staleCounter(city).increment(removed.doubleValue());
+                }
+
+                double lat =
+                        ((Number) ride.get("lat")).doubleValue();
+
+                double lon =
+                        ((Number) ride.get("lon")).doubleValue();
+
+                var nearby = redis.opsForGeo().radius(
+                        "geo:" + city,
+                        new Circle(
+                                new Point(lon, lat),
+                                new Distance(5, Metrics.KILOMETERS)
+                        ),
+                        RedisGeoCommands.GeoRadiusCommandArgs
+                                .newGeoRadiusArgs()
+                                .sortAscending()
+                                .limit(100)
+                );
+
+                String selectedDriver = null;
+
+                if (nearby != null) {
+                    for (var candidate : nearby) {
+                        String driver =
+                                candidate.getContent().getName();
+
+                        Double lastSeen = redis.opsForZSet().score(
+                                "seen:" + city,
+                                driver
+                        );
+
+                        long currentCutoff =
+                                System.currentTimeMillis()
+                                        - MAX_LOCATION_AGE_MS;
+
+                        if (lastSeen == null
+                                || lastSeen <= currentCutoff) {
+                            continue;
+                        }
+
+                        int reserved = db.update("""
+                                INSERT INTO assignments (
+                                    driver_id,
+                                    ride_id
+                                )
+                                VALUES (?, ?)
+                                ON CONFLICT DO NOTHING
+                                """,
+                                driver,
+                                rideId
+                        );
+
+                        if (reserved == 1) {
+                            selectedDriver = driver;
+                            break;
+                        }
+                    }
+                }
+
+                if (selectedDriver == null) {
+                    db.update("""
+                            UPDATE rides
+                            SET status = 'NO_DRIVER'
+                            WHERE id = ?
+                            """,
+                            rideId
+                    );
+
+                    log.info("No available driver for ride {}", rideId);
+
+                    return "NO_DRIVER";
+                }
+
                 db.update("""
                         UPDATE rides
                         SET status = 'MATCHED',
@@ -249,9 +272,16 @@ public class MatchingWorker {
                         rideId,
                         selectedDriver
                 );
-            }
-        });
 
-        updates.notifyRide(rideId);
+                return "MATCHED";
+            });
+
+            // TransactionTemplate returns after successful commit.
+            outcome = result == null ? "ERROR" : result;
+
+            updates.notifyRide(rideId);
+        } finally {
+            sample.stop(processingTimer(expectedCity, outcome));
+        }
     }
 }
