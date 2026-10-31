@@ -30,3 +30,5 @@ replay_pid*
 *.log
 
 /mosquitto/secrets/
+
+/backups/
