@@ -167,3 +167,27 @@ jobs:
       - name: Stop CI MQTT broker
         if: always()
         run: docker rm -f rideflow-ci-mqtt || true
+  monitoring:
+    name: Validate Prometheus configuration and alerts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Validate Prometheus configuration
+        run: |
+          docker run --rm \
+            --entrypoint /bin/promtool \
+            --mount "type=bind,source=${GITHUB_WORKSPACE}/monitoring/prometheus,target=/etc/prometheus,readonly" \
+            prom/prometheus:v3.5.0 \
+            check config /etc/prometheus/prometheus.yml
+
+      - name: Validate alert rules
+        run: |
+          docker run --rm \
+            --entrypoint /bin/promtool \
+            --mount "type=bind,source=${GITHUB_WORKSPACE}/monitoring/prometheus,target=/etc/prometheus,readonly" \
+            prom/prometheus:v3.5.0 \
+            check rules /etc/prometheus/alerts.yml
