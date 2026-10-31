@@ -226,14 +226,24 @@ public class MatchingWorker {
 
                         int reserved = db.update("""
                                 INSERT INTO assignments (
-                                    driver_id,
-                                    ride_id
+                                driver_id,
+                                ride_id
                                 )
-                                VALUES (?, ?)
+                                SELECT ?, ?
+                                WHERE EXISTS (
+                                SELECT 1
+                                FROM account_roles
+                                WHERE firebase_uid = ?
+                                AND role = 'DRIVER'
+                                AND enabled = TRUE
+                                AND driver_city = ?
+                                )
                                 ON CONFLICT DO NOTHING
                                 """,
                                 driver,
-                                rideId
+                                rideId,
+                                driver,
+                                city
                         );
 
                         if (reserved == 1) {

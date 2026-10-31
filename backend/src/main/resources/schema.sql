@@ -105,3 +105,12 @@ WHERE r.status = 'COMPLETED'
 
 ALTER TABLE rides
 ALTER COLUMN rider_id TYPE VARCHAR(128);
+
+CREATE TABLE IF NOT EXISTS account_roles (
+    firebase_uid VARCHAR(128) PRIMARY KEY,
+    role VARCHAR(10) NOT NULL CHECK (role IN ('RIDER', 'DRIVER')),
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    driver_city VARCHAR(30),
+    CHECK ((role = 'RIDER' AND driver_city IS NULL)
+        OR (role = 'DRIVER' AND driver_city IN ('colombo', 'kandy') AND driver_city IS NOT NULL))
+);
