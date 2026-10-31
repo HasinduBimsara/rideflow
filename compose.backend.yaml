@@ -1,0 +1,74 @@
+services:
+  redis:
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  rabbitmq:
+    healthcheck:
+      test:
+        - CMD
+        - rabbitmq-diagnostics
+        - -q
+        - check_port_connectivity
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+
+  mqtt:
+    environment:
+      RIDEFLOW_MQTT_PASSWORD: ${RIDEFLOW_MQTT_PASSWORD:?Set the ingestion MQTT password first}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          mosquitto_sub
+          -h 127.0.0.1
+          -u ingestion
+          -P "$$RIDEFLOW_MQTT_PASSWORD"
+          -t 'drivers/+/+/location'
+          -E -W 5
+      interval: 10s
+      timeout: 8s
+      retries: 12
+      start_period: 5s
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: rideflow-backend:local
+    ports:
+      - "127.0.0.1:8081:8081"
+    environment:
+      SERVER_ADDRESS: 0.0.0.0
+      SERVER_PORT: "8081"
+
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/rides
+      SPRING_DATASOURCE_USERNAME: ride
+      SPRING_DATASOURCE_PASSWORD: ride_local_password
+
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: "6379"
+
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: "5672"
+      SPRING_RABBITMQ_USERNAME: ride
+      SPRING_RABBITMQ_PASSWORD: ride_local_password
+      SPRING_RABBITMQ_LISTENER_SIMPLE_AUTO_STARTUP: "true"
+
+      RIDEFLOW_MQTT_URL: tcp://mqtt:1883
+      RIDEFLOW_MQTT_USERNAME: ingestion
+      RIDEFLOW_MQTT_PASSWORD: ${RIDEFLOW_MQTT_PASSWORD:?Set the ingestion MQTT password first}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      mqtt:
+        condition: service_healthy
