@@ -1,166 +1,169 @@
 name: Backend CI
 
 on:
-    push:
-        branches: [main]
-    pull_request:
-        branches: [main]
-    workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
-    contents: read
+  contents: read
 
 concurrency:
-    group: backend-ci-${{ github.ref }}
-    cancel-in-progress: true
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-    build:
-        name: Test and package backend
-        runs-on: ubuntu-latest
-        timeout-minutes: 20
+  build:
+    name: Test and package backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
 
+    env:
+      # Disposable CI credentials, not local account passwords.
+      RIDEFLOW_MQTT_PASSWORD: rideflow_ci_mqtt_password
+      SPRING_DATASOURCE_URL: jdbc:postgresql://127.0.0.1:5432/rides
+      SPRING_DATASOURCE_USERNAME: ride
+      SPRING_DATASOURCE_PASSWORD: rideflow_ci_db_password
+      SPRING_DATA_REDIS_HOST: 127.0.0.1
+      SPRING_DATA_REDIS_PORT: "6379"
+      SPRING_RABBITMQ_HOST: 127.0.0.1
+      SPRING_RABBITMQ_PORT: "5672"
+      SPRING_RABBITMQ_USERNAME: ride
+      SPRING_RABBITMQ_PASSWORD: rideflow_ci_rabbit_password
+      RIDEFLOW_MQTT_URL: tcp://127.0.0.1:1883
+      RIDEFLOW_MQTT_USERNAME: ingestion
+
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
         env:
-            # Disposable CI credentials, not local account passwords.
-            RIDEFLOW_MQTT_PASSWORD: rideflow_ci_mqtt_password
-            SPRING_DATASOURCE_URL: jdbc:postgresql://127.0.0.1:5432/rides
-            SPRING_DATASOURCE_USERNAME: ride
-            SPRING_DATASOURCE_PASSWORD: rideflow_ci_db_password
-            SPRING_DATA_REDIS_HOST: 127.0.0.1
-            SPRING_DATA_REDIS_PORT: "6379"
-            SPRING_RABBITMQ_HOST: 127.0.0.1
-            SPRING_RABBITMQ_PORT: "5672"
-            SPRING_RABBITMQ_USERNAME: ride
-            SPRING_RABBITMQ_PASSWORD: rideflow_ci_rabbit_password
-            RIDEFLOW_MQTT_URL: tcp://127.0.0.1:1883
-            RIDEFLOW_MQTT_USERNAME: ingestion
+          POSTGRES_DB: rides
+          POSTGRES_USER: ride
+          POSTGRES_PASSWORD: rideflow_ci_db_password
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ride -d rides"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
 
-        services:
-            postgres:
-                image: postgis/postgis:16-3.4
-                env:
-                    POSTGRES_DB: rides
-                    POSTGRES_USER: ride
-                    POSTGRES_PASSWORD: rideflow_ci_db_password
-                ports:
-                    - 127.0.0.1:5432:5432
-                options: >-
-                    --health-cmd "pg_isready -U ride -d rides"
-                    --health-interval 5s
-                    --health-timeout 5s
-                    --health-retries 30
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 127.0.0.1:6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
 
-            redis:
-                image: redis:7.4-alpine
-                ports:
-                    - 127.0.0.1:6379:6379
-                options: >-
-                    --health-cmd "redis-cli ping"
-                    --health-interval 5s
-                    --health-timeout 5s
-                    --health-retries 30
+      rabbitmq:
+        image: rabbitmq:4.1-management
+        env:
+          RABBITMQ_DEFAULT_USER: ride
+          RABBITMQ_DEFAULT_PASS: rideflow_ci_rabbit_password
+        ports:
+          - 127.0.0.1:5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q check_port_connectivity"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 30
 
-            rabbitmq:
-                image: rabbitmq:4.1-management
-                env:
-                    RABBITMQ_DEFAULT_USER: ride
-                    RABBITMQ_DEFAULT_PASS: rideflow_ci_rabbit_password
-                ports:
-                    - 127.0.0.1:5672:5672
-                options: >-
-                    --health-cmd "rabbitmq-diagnostics -q check_port_connectivity"
-                    --health-interval 5s
-                    --health-timeout 10s
-                    --health-retries 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
 
-        steps:
-            - name: Checkout repository
-              uses: actions/checkout@v6
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: backend/pom.xml
 
-            - name: Set up Java 17
-              uses: actions/setup-java@v5
-              with:
-                  distribution: temurin
-                  java-version: "17"
-                  cache: maven
-                  cache-dependency-path: backend/pom.xml
+      - name: Start authenticated CI MQTT broker
+        shell: bash
+        run: |
+          docker run -d \
+            --name rideflow-ci-mqtt \
+            --user root \
+            -p 127.0.0.1:1883:1883 \
+            -e RIDEFLOW_MQTT_PASSWORD \
+            eclipse-mosquitto:2 \
+            sh -ec '
+              mosquitto_passwd -b -c /tmp/ci-passwords \
+                ingestion "$RIDEFLOW_MQTT_PASSWORD"
 
-            - name: Start authenticated CI MQTT broker
-              shell: bash
-              run: |
-                  docker run -d \
-                    --name rideflow-ci-mqtt \
-                    --user root \
-                    -p 127.0.0.1:1883:1883 \
-                    -e RIDEFLOW_MQTT_PASSWORD \
-                    eclipse-mosquitto:2 \
-                    sh -ec '
-                      mosquitto_passwd -b -c /tmp/ci-passwords \
-                        ingestion "$RIDEFLOW_MQTT_PASSWORD"
+              printf "%s\n" \
+                "user ingestion" \
+                "topic read drivers/+/+/location" \
+                > /tmp/ci-acl
 
-                      printf "%s\n" \
-                        "user ingestion" \
-                        "topic read drivers/+/+/location" \
-                        > /tmp/ci-acl
+              printf "%s\n" \
+                "listener 1883" \
+                "allow_anonymous false" \
+                "password_file /tmp/ci-passwords" \
+                "acl_file /tmp/ci-acl" \
+                "persistence false" \
+                > /tmp/ci-mosquitto.conf
 
-                      printf "%s\n" \
-                        "listener 1883" \
-                        "allow_anonymous false" \
-                        "password_file /tmp/ci-passwords" \
-                        "acl_file /tmp/ci-acl" \
-                        "persistence false" \
-                        > /tmp/ci-mosquitto.conf
+              chown mosquitto:mosquitto \
+                /tmp/ci-passwords /tmp/ci-acl /tmp/ci-mosquitto.conf
 
-                      chown mosquitto:mosquitto \
-                        /tmp/ci-passwords /tmp/ci-acl /tmp/ci-mosquitto.conf
+              chmod 600 /tmp/ci-passwords /tmp/ci-acl
+              chmod 644 /tmp/ci-mosquitto.conf
 
-                      chmod 600 /tmp/ci-passwords /tmp/ci-acl
-                      chmod 644 /tmp/ci-mosquitto.conf
+              exec mosquitto -c /tmp/ci-mosquitto.conf
+            '
 
-                      exec mosquitto -c /tmp/ci-mosquitto.conf
-                    '
+      - name: Wait for MQTT authentication and subscription
+        shell: bash
+        run: |
+          for attempt in {1..20}; do
+            if docker exec rideflow-ci-mqtt sh -ec '
+              mosquitto_sub \
+                -h 127.0.0.1 \
+                -u ingestion \
+                -P "$RIDEFLOW_MQTT_PASSWORD" \
+                -t "drivers/+/+/location" \
+                -E -W 5
+            '; then
+              echo "MQTT broker is ready."
+              exit 0
+            fi
 
-            - name: Wait for MQTT authentication and subscription
-              shell: bash
-              run: |
-                  for attempt in {1..20}; do
-                    if docker exec rideflow-ci-mqtt sh -ec '
-                      mosquitto_sub \
-                        -h 127.0.0.1 \
-                        -u ingestion \
-                        -P "$RIDEFLOW_MQTT_PASSWORD" \
-                        -t "drivers/+/+/location" \
-                        -E -W 5
-                    '; then
-                      echo "MQTT broker is ready."
-                      exit 0
-                    fi
+            echo "Waiting for MQTT: attempt $attempt/20"
+            sleep 2
+          done
 
-                    echo "Waiting for MQTT: attempt $attempt/20"
-                    sleep 2
-                  done
+          docker logs rideflow-ci-mqtt
+          exit 1
 
-                  docker logs rideflow-ci-mqtt
-                  exit 1
+      - name: Run tests and build JAR
+        working-directory: backend
+        run: bash ./mvnw --batch-mode --no-transfer-progress clean verify
 
-            - name: Run tests and build JAR
-              working-directory: backend
-              run: bash ./mvnw --batch-mode --no-transfer-progress clean verify
+      - name: Build backend Docker image
+        run: docker build --tag rideflow-backend:ci ./backend
 
-            - name: Show diagnostics on failure
-              if: failure()
-              shell: bash
-              run: |
-                  docker ps -a
-                  docker logs rideflow-ci-mqtt || true
+      - name: Show diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          docker ps -a
+          docker logs rideflow-ci-mqtt || true
 
-                  if [ -d backend/target/surefire-reports ]; then
-                    find backend/target/surefire-reports \
-                      -maxdepth 1 \
-                      -name '*.txt' \
-                      -exec cat {} \;
-                  fi
+          if [ -d backend/target/surefire-reports ]; then
+            find backend/target/surefire-reports \
+              -maxdepth 1 \
+              -name '*.txt' \
+              -exec cat {} \;
+          fi
 
-            - name: Stop CI MQTT broker
-              if: always()
-              run: docker rm -f rideflow-ci-mqtt || true
+      - name: Stop CI MQTT broker
+        if: always()
+        run: docker rm -f rideflow-ci-mqtt || true
