@@ -1,0 +1,11 @@
+groups:
+  - name: rideflow-availability
+    rules:
+      - alert: RideFlowBackendUnavailable
+        expr: up{job="rideflow-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RideFlow backend metrics unavailable"
+          description: "Prometheus has been unable to scrape {{ $labels.instance }} for at least one minute."
